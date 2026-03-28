@@ -149,8 +149,24 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	existing, _ := state.Get(worktreeName)
 	if existing != nil {
-		return fmt.Errorf("already running on port %d (PID %d) — run `devbrowser stop %s` first",
-			existing.Port, existing.ServerPID, worktreeName)
+		if isServerAlive(existing.ServerPID) {
+			// Server is still running — just reattach Chrome with the correct profile
+			fmt.Printf("  %s  existing session on port %d — attaching...\n\n",
+				color.YellowString("found    "), existing.Port)
+			existingURL := fmt.Sprintf("http://localhost:%d", existing.Port)
+			existingProfileDir := filepath.Join(func() string {
+				d, _ := config.ProfilesDir()
+				if cfg.ProfilesDir != "" {
+					return cfg.ProfilesDir
+				}
+				return d
+			}(), worktreeName)
+			return attachToSession(cfg, existing.Port, existingProfileDir, existingURL)
+		}
+		// Stale entry — clean up and start fresh
+		fmt.Printf("  %s  stale session (PID %d dead) — starting fresh\n\n",
+			color.YellowString("cleanup  "), existing.ServerPID)
+		_ = state.Remove(worktreeName)
 	}
 
 	chromeBin, err := browser.Find(cfg.BrowserPath)
@@ -272,7 +288,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			return nil
 
 		case <-browserDone:
-			_ = browserCmd.Process.Kill() // ensure process is gone after windows close
+			_ = browserCmd.Process.Kill()
 			action := promptAfterChromeClosed()
 			switch action {
 			case "r":
@@ -284,12 +300,67 @@ func runRun(cmd *cobra.Command, args []string) error {
 				fmt.Println("🔴  Stopping dev server...")
 				cleanup()
 				return nil
-			default: // "q"
+			default: // "q" — keep server, keep state so reattach works
 				fmt.Printf("💤  Dev server kept running on port %d\n", p)
-				fmt.Printf("    Re-attach: devbrowser -p %d\n", p)
-				_ = state.Remove(worktreeName)
+				fmt.Printf("    Re-attach: devbrowser %s\n", worktreeName)
+				// Keep state entry so `devbrowser <worktree>` can find the session
 				return nil
 			}
+		}
+	}
+}
+
+func isServerAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	return syscall.Kill(pid, 0) == nil
+}
+
+// attachToSession opens Chrome for an existing session using the correct profile.
+func attachToSession(cfg config.Config, p int, profileDir, url string) error {
+	chromeBin, err := browser.Find(cfg.BrowserPath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(profileDir, 0755); err != nil {
+		return err
+	}
+
+	for {
+		browserCmd, err := browser.Launch(chromeBin, profileDir, url)
+		if err != nil {
+			return err
+		}
+
+		browserDone := make(chan struct{}, 1)
+		go func() {
+			browser.WaitForClose(browserCmd.Process.Pid)
+			browserDone <- struct{}{}
+		}()
+
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+		select {
+		case <-sigCh:
+			fmt.Println("\n🔴  Interrupted.")
+			_ = browserCmd.Process.Kill()
+			return nil
+		case <-browserDone:
+			_ = browserCmd.Process.Kill()
+			fmt.Println()
+			fmt.Println("Chrome closed. What would you like to do?")
+			fmt.Println("  [r] Relaunch Chrome")
+			fmt.Println("  [q] Quit")
+			fmt.Print("> ")
+			scanner := bufio.NewScanner(os.Stdin)
+			if scanner.Scan() {
+				if strings.TrimSpace(strings.ToLower(scanner.Text())) == "r" {
+					continue
+				}
+			}
+			return nil
 		}
 	}
 }
