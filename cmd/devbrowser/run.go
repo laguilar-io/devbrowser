@@ -102,6 +102,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
+	// Attach-only mode: explicit -p with no worktree arg and no command
+	// Just open Chrome pointed at the running server, no server management.
+	if flagPort != 0 && len(args) == 0 && flagCommand == "" {
+		return attachOnly(cfg, flagPort)
+	}
+
 	worktreeDir := "."
 	worktreeName := ""
 	repoRoot := ""
@@ -282,6 +288,76 @@ func runRun(cmd *cobra.Command, args []string) error {
 				fmt.Printf("💤  Dev server kept running on port %d\n", p)
 				fmt.Printf("    Re-attach: devbrowser -p %d\n", p)
 				_ = state.Remove(worktreeName)
+				return nil
+			}
+		}
+	}
+}
+
+// attachOnly opens Chrome pointed at an already-running server.
+// No server is started or stopped — Chrome lifecycle only.
+func attachOnly(cfg config.Config, p int) error {
+	chromeBin, err := browser.Find(cfg.BrowserPath)
+	if err != nil {
+		return err
+	}
+
+	profilesDir := cfg.ProfilesDir
+	if profilesDir == "" {
+		profilesDir, err = config.ProfilesDir()
+		if err != nil {
+			return err
+		}
+	}
+
+	cwd, _ := os.Getwd()
+	worktreeName := filepath.Base(filepath.Dir(cwd)) + "__" + filepath.Base(cwd)
+	profileDir := filepath.Join(profilesDir, worktreeName)
+	url := fmt.Sprintf("http://localhost:%d", p)
+
+	info := sessionInfo{
+		worktreeName: worktreeName,
+		worktreeDir:  cwd,
+		devCmd:       "(attached — server already running)",
+		p:            p,
+		profileDir:   profileDir,
+		url:          url,
+	}
+	clearScreen()
+	printSessionInfo(info)
+	fmt.Printf("🔗  Attaching Chrome to existing server...\n\n")
+
+	for {
+		browserCmd, err := browser.Launch(chromeBin, profileDir, url)
+		if err != nil {
+			return err
+		}
+
+		browserDone := make(chan struct{}, 1)
+		go func() {
+			browser.WaitForClose(browserCmd.Process.Pid)
+			browserDone <- struct{}{}
+		}()
+
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+		select {
+		case <-sigCh:
+			fmt.Println("\n🔴  Interrupted.")
+			_ = browserCmd.Process.Kill()
+			return nil
+		case <-browserDone:
+			_ = browserCmd.Process.Kill()
+			action := promptAfterChromeClosed()
+			switch action {
+			case "r":
+				clearScreen()
+				printSessionInfo(info)
+				fmt.Printf("🔄  Relaunching Chrome at %s...\n\n", url)
+				continue
+			default: // "k" or "q" — we don't own the server either way
+				fmt.Printf("💤  Detached from port %d\n", p)
 				return nil
 			}
 		}
