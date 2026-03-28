@@ -302,7 +302,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 				return nil
 			default: // "q" — keep server, keep state so reattach works
 				fmt.Printf("💤  Dev server kept running on port %d\n", p)
-				fmt.Printf("    Re-attach: devbrowser %s\n", worktreeName)
+				if len(args) == 1 {
+					fmt.Printf("    Re-attach: devbrowser %s\n", args[0])
+				}
 				// Keep state entry so `devbrowser <worktree>` can find the session
 				return nil
 			}
