@@ -27,6 +27,15 @@ var (
 	flagCommand string
 )
 
+var stdinScanner = bufio.NewScanner(os.Stdin)
+
+func readLine() string {
+	if stdinScanner.Scan() {
+		return strings.TrimSpace(strings.ToLower(stdinScanner.Text()))
+	}
+	return ""
+}
+
 var runCmd = &cobra.Command{
 	Use:     "run [worktree]",
 	Short:   "Start a dev server and open an isolated Chrome session",
@@ -155,13 +164,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 				color.YellowString("found    "), existing.Port)
 			existingURL := fmt.Sprintf("http://localhost:%d", existing.Port)
 			existingProfileDir := filepath.Join(func() string {
-				d, _ := config.ProfilesDir()
 				if cfg.ProfilesDir != "" {
 					return cfg.ProfilesDir
 				}
+				d, _ := config.ProfilesDir()
 				return d
 			}(), worktreeName)
-			return attachToSession(cfg, existing.Port, existingProfileDir, existingURL)
+			return attachToSession(cfg, worktreeName, existing.Port, existingProfileDir, existingURL)
 		}
 		// Stale entry — clean up and start fresh
 		fmt.Printf("  %s  stale session (PID %d dead) — starting fresh\n\n",
@@ -320,7 +329,8 @@ func isServerAlive(pid int) bool {
 }
 
 // attachToSession opens Chrome for an existing session using the correct profile.
-func attachToSession(cfg config.Config, p int, profileDir, url string) error {
+// It reads the state entry so it can offer [k]ill server option.
+func attachToSession(cfg config.Config, worktreeName string, p int, profileDir, url string) error {
 	chromeBin, err := browser.Find(cfg.BrowserPath)
 	if err != nil {
 		return err
@@ -351,20 +361,34 @@ func attachToSession(cfg config.Config, p int, profileDir, url string) error {
 			return nil
 		case <-browserDone:
 			_ = browserCmd.Process.Kill()
-			fmt.Println()
-			fmt.Println("Chrome closed. What would you like to do?")
-			fmt.Println("  [r] Relaunch Chrome")
-			fmt.Println("  [q] Quit")
-			fmt.Print("> ")
-			scanner := bufio.NewScanner(os.Stdin)
-			if scanner.Scan() {
-				if strings.TrimSpace(strings.ToLower(scanner.Text())) == "r" {
-					continue
+			action := promptAttachedChromeClosed()
+			switch action {
+			case "r":
+				continue
+			case "k":
+				fmt.Println("🔴  Stopping dev server...")
+				entry, _ := state.Get(worktreeName)
+				if entry != nil {
+					killGroupByPGID(entry.ServerPGID)
+					_ = state.Remove(worktreeName)
 				}
+				return nil
+			default: // "q"
+				fmt.Printf("💤  Detached. Server still on port %d\n", p)
+				return nil
 			}
-			return nil
 		}
 	}
+}
+
+func promptAttachedChromeClosed() string {
+	fmt.Println()
+	fmt.Println("Chrome closed. What would you like to do?")
+	fmt.Println("  [r] Relaunch Chrome  (keeps session, cookies, localStorage)")
+	fmt.Println("  [k] Kill dev server and exit")
+	fmt.Println("  [q] Quit devbrowser  (keep dev server running)")
+	fmt.Print("> ")
+	return readLine()
 }
 
 // attachOnly opens Chrome pointed at an already-running server.
@@ -443,10 +467,5 @@ func promptAfterChromeClosed() string {
 	fmt.Println("  [k] Kill dev server and exit")
 	fmt.Println("  [q] Quit devbrowser  (keep dev server running in background)")
 	fmt.Print("> ")
-
-	scanner := bufio.NewScanner(os.Stdin)
-	if scanner.Scan() {
-		return strings.TrimSpace(strings.ToLower(scanner.Text()))
-	}
-	return "k"
+	return readLine()
 }
