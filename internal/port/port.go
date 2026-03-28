@@ -7,11 +7,11 @@ import (
 )
 
 // FindAvailable returns the first free TCP port starting from start.
+// Uses Dial instead of Listen to correctly detect ports bound only to
+// localhost (127.0.0.1) on macOS where SO_REUSEADDR can cause false negatives.
 func FindAvailable(start int) (int, error) {
 	for p := start; p <= 65535; p++ {
-		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", p))
-		if err == nil {
-			ln.Close()
+		if !IsOpen(p) {
 			return p, nil
 		}
 	}

@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -16,7 +17,9 @@ type Server struct {
 }
 
 // Start launches the dev command inside dir with a new process group.
-func Start(dir, command string) (*Server, error) {
+// port is injected via the PORT environment variable so it works with
+// Next.js, Vite, CRA, and any other framework that respects PORT.
+func Start(dir, command string, p int) (*Server, error) {
 	parts := strings.Fields(command)
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("empty command")
@@ -28,6 +31,8 @@ func Start(dir, command string) (*Server, error) {
 	// Inherit stdout/stderr so the user sees dev server output
 	cmd.Stdout = nil
 	cmd.Stderr = nil
+	// Inject PORT — respected by Next.js, Vite, CRA, etc.
+	cmd.Env = append(os.Environ(), fmt.Sprintf("PORT=%d", p))
 	setSysProcAttr(cmd)
 
 	if err := cmd.Start(); err != nil {

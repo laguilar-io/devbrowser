@@ -11,9 +11,10 @@ import (
 var version = "dev"
 
 var rootCmd = &cobra.Command{
-	Use:     "devbrowser",
-	Short:   "Launch an isolated Chrome session per git worktree",
-	Version: version,
+	Use:              "devbrowser",
+	Short:            "Launch an isolated Chrome session per git worktree",
+	Version:          version,
+	SilenceUsage:     true,
 	Long: `devbrowser bridges git worktrees with isolated browser sessions.
 
 Each worktree gets its own Chrome profile (cookies, sessions, storage)
