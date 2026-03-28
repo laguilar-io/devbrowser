@@ -43,7 +43,10 @@ func Launch(binary, profileDir, url string) (*exec.Cmd, error) {
 		"--disable-extensions",
 		"--auto-open-devtools-for-tabs",
 		"--no-first-run",
-		url,
+		// --app mode makes Chrome a standalone window:
+		// closing the window (X) actually kills the process on macOS,
+		// which lets devbrowser detect the close reliably.
+		"--app="+url,
 	)
 	cmd.Stdout = nil
 	cmd.Stderr = nil

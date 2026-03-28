@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -46,6 +45,57 @@ func init() {
 	rootCmd.Flags().StringVarP(&flagCommand, "command", "c", "", "Dev server command override")
 }
 
+// shortenPath replaces the home directory prefix with ~
+func shortenPath(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	if strings.HasPrefix(p, home) {
+		return "~" + p[len(home):]
+	}
+	return p
+}
+
+func clearScreen() {
+	fmt.Print("\033[H\033[2J")
+}
+
+type sessionInfo struct {
+	worktreeName string
+	worktreeDir  string
+	devCmd       string
+	p            int
+	profileDir   string
+	url          string
+	envCopied    []string
+}
+
+func printSessionInfo(info sessionInfo) {
+	bold := color.New(color.Bold).SprintFunc()
+	cyan := color.CyanString
+
+	fmt.Println()
+	fmt.Printf("  %s\n", bold("devbrowser"))
+	fmt.Println()
+
+	rows := [][]string{
+		{"worktree", shortenPath(info.worktreeDir)},
+		{"command ", info.devCmd},
+		{"port    ", fmt.Sprintf("%d", info.p)},
+		{"url     ", info.url},
+		{"profile ", shortenPath(info.profileDir)},
+	}
+	for _, f := range info.envCopied {
+		rows = append(rows, []string{"env     ", filepath.Base(f)})
+	}
+
+	for _, row := range rows {
+		fmt.Printf("  %s  %s\n", cyan(row[0]), row[1])
+	}
+	fmt.Println()
+}
+
 func runRun(cmd *cobra.Command, args []string) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -64,12 +114,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 		worktreeDir = wt.Path
 		projectName := filepath.Base(filepath.Dir(filepath.Dir(wt.Path)))
 		worktreeName = projectName + "__" + wt.Name
-		// repo root = main worktree (first entry in git worktree list)
 		wts, _ := worktree.List()
 		if len(wts) > 0 {
 			repoRoot = wts[0].Path
 		}
-		fmt.Printf("  %s  %s\n", color.CyanString("worktree"), wt.Path)
 	} else {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -80,7 +128,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 		repoRoot = cwd
 	}
 
-	// Determine port
 	p := flagPort
 	if p == 0 {
 		p, err = port.FindAvailable(cfg.StartPort)
@@ -89,26 +136,22 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Determine command
 	devCmd := flagCommand
 	if devCmd == "" {
 		devCmd = cfg.DefaultCommand
 	}
 
-	// Check if already running
 	existing, _ := state.Get(worktreeName)
 	if existing != nil {
 		return fmt.Errorf("already running on port %d (PID %d) — run `devbrowser stop %s` first",
 			existing.Port, existing.ServerPID, worktreeName)
 	}
 
-	// Browser binary
 	chromeBin, err := browser.Find(cfg.BrowserPath)
 	if err != nil {
 		return err
 	}
 
-	// Profile dir
 	profilesDir := cfg.ProfilesDir
 	if profilesDir == "" {
 		profilesDir, err = config.ProfilesDir()
@@ -119,25 +162,29 @@ func runRun(cmd *cobra.Command, args []string) error {
 	profileDir := filepath.Join(profilesDir, worktreeName)
 	url := fmt.Sprintf("http://localhost:%d", p)
 
-	fmt.Printf("  %s  %s\n", color.CyanString("command "), devCmd)
-	fmt.Printf("  %s  %d\n", color.CyanString("port    "), p)
-	fmt.Printf("  %s  %s\n", color.CyanString("profile "), profileDir)
-	fmt.Printf("  %s  %s\n", color.CyanString("url     "), url)
-	fmt.Println()
-
-	// Copy .env*.local files from repo root to worktree
+	// Copy .env*.local from repo root to worktree
 	var envResult *envfiles.CopyResult
 	if repoRoot != "" && repoRoot != worktreeDir {
 		envResult, err = envfiles.CopyToWorktree(repoRoot, worktreeDir)
 		if err != nil {
 			fmt.Printf("⚠️  Could not copy env files: %v\n", err)
-		} else if len(envResult.Copied) > 0 {
-			for _, f := range envResult.Copied {
-				fmt.Printf("  %s  %s\n", color.CyanString("env     "), filepath.Base(f))
-			}
-			fmt.Println()
 		}
 	}
+
+	info := sessionInfo{
+		worktreeName: worktreeName,
+		worktreeDir:  worktreeDir,
+		devCmd:       devCmd,
+		p:            p,
+		profileDir:   profileDir,
+		url:          url,
+	}
+	if envResult != nil {
+		info.envCopied = envResult.Copied
+	}
+
+	clearScreen()
+	printSessionInfo(info)
 
 	// Start dev server
 	srv, err := server.Start(worktreeDir, devCmd, p)
@@ -163,7 +210,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Wait for server ready
 	fmt.Printf("⏳  Waiting for localhost:%d...\n", p)
 
 	readyCh := make(chan error, 1)
@@ -188,7 +234,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("✅  Server ready — opening Chrome...\n\n")
 
-	// Launch browser and handle lifecycle
 	for {
 		browserCmd, err := browser.Launch(chromeBin, profileDir, url)
 		if err != nil {
@@ -198,7 +243,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 		entry.BrowserPID = browserCmd.Process.Pid
 		_ = state.Add(worktreeName, entry)
 
-		// Fan-in: browser exit or OS signal
 		browserDone := make(chan error, 1)
 		go func() { browserDone <- browserCmd.Wait() }()
 
@@ -219,22 +263,21 @@ func runRun(cmd *cobra.Command, args []string) error {
 			return nil
 
 		case <-browserDone:
-			// Chrome closed — ask what to do
-			fmt.Println()
 			action := promptAfterChromeClosed()
 			switch action {
 			case "r":
-				fmt.Printf("🔄  Relaunching Chrome at %s...\n", url)
-				continue // relaunch browser, same server
+				clearScreen()
+				printSessionInfo(info)
+				fmt.Printf("🔄  Relaunching Chrome at %s...\n\n", url)
+				continue
 			case "k":
 				fmt.Println("🔴  Stopping dev server...")
 				cleanup()
 				return nil
-			default: // "q" or anything else
-				fmt.Println("💤  Dev server kept running on port", p)
-				fmt.Printf("    Re-attach with: devbrowser -p %d\n", p)
+			default: // "q"
+				fmt.Printf("💤  Dev server kept running on port %d\n", p)
+				fmt.Printf("    Re-attach: devbrowser -p %d\n", p)
 				_ = state.Remove(worktreeName)
-				// Don't cleanup env files — server keeps running
 				return nil
 			}
 		}
@@ -243,7 +286,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 func promptAfterChromeClosed() string {
 	fmt.Println("Chrome closed. What would you like to do?")
-	fmt.Println("  [r] Relaunch Chrome  (keep session, cookies, localStorage)")
+	fmt.Println("  [r] Relaunch Chrome  (keeps session, cookies, localStorage)")
 	fmt.Println("  [k] Kill dev server and exit")
 	fmt.Println("  [q] Quit devbrowser  (keep dev server running in background)")
 	fmt.Print("> ")
@@ -253,8 +296,4 @@ func promptAfterChromeClosed() string {
 		return strings.TrimSpace(strings.ToLower(scanner.Text()))
 	}
 	return "k"
-}
-
-func launchBrowserCmd(binary, profileDir, url string) (*exec.Cmd, error) {
-	return browser.Launch(binary, profileDir, url)
 }
