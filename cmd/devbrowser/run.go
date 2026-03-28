@@ -243,8 +243,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 		entry.BrowserPID = browserCmd.Process.Pid
 		_ = state.Add(worktreeName, entry)
 
-		browserDone := make(chan error, 1)
-		go func() { browserDone <- browserCmd.Wait() }()
+		browserDone := make(chan struct{}, 1)
+		go func() {
+			browser.WaitForClose(browserCmd.Process.Pid)
+			browserDone <- struct{}{}
+		}()
 
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -263,6 +266,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			return nil
 
 		case <-browserDone:
+			_ = browserCmd.Process.Kill() // ensure process is gone after windows close
 			action := promptAfterChromeClosed()
 			switch action {
 			case "r":
