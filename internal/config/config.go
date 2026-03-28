@@ -34,10 +34,7 @@ func Load() (Config, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		// Write default config on first run
 		_ = writeDefaults(path, cfg)
-		return cfg, nil
-	}
-
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+	} else if _, err := toml.DecodeFile(path, &cfg); err != nil {
 		return cfg, err
 	}
 
