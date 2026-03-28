@@ -28,9 +28,8 @@ func Start(dir, command string, p int) (*Server, error) {
 	cmd := exec.Command(parts[0], parts[1:]...)
 	cmd.Dir = dir
 	cmd.Stdin = nil
-	// Inherit stdout/stderr so the user sees dev server output
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	// Inject PORT — respected by Next.js, Vite, CRA, etc.
 	cmd.Env = append(os.Environ(), fmt.Sprintf("PORT=%d", p))
 	setSysProcAttr(cmd)
