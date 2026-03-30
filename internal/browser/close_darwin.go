@@ -14,7 +14,10 @@ import (
 // WaitForClose blocks until all Chrome windows for the given PID are closed.
 // On macOS, pressing X hides the window but keeps the process alive.
 // We poll window count via osascript to detect the real close.
+// Two consecutive zero-window readings are required to avoid false positives
+// during page navigations or DevTools transitions.
 func WaitForClose(pid int) {
+	zeroCount := 0
 	for {
 		time.Sleep(1 * time.Second)
 
@@ -31,15 +34,23 @@ func WaitForClose(pid int) {
 		out, err := exec.Command("osascript", "-e", script).Output()
 		if err != nil {
 			// osascript failed (e.g. accessibility not granted) — fall back to process death
+			zeroCount = 0
 			continue
 		}
 
 		count, err := strconv.Atoi(strings.TrimSpace(string(out)))
 		if err != nil {
+			zeroCount = 0
 			continue
 		}
+
 		if count == 0 {
-			return // all windows closed
+			zeroCount++
+			if zeroCount >= 2 {
+				return // confirmed closed
+			}
+		} else {
+			zeroCount = 0
 		}
 	}
 }
