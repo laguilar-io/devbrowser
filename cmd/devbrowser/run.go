@@ -15,6 +15,7 @@ import (
 
 	"github.com/laguilar-io/devbrowser/internal/browser"
 	"github.com/laguilar-io/devbrowser/internal/config"
+	"github.com/laguilar-io/devbrowser/internal/deps"
 	"github.com/laguilar-io/devbrowser/internal/envfiles"
 	"github.com/laguilar-io/devbrowser/internal/port"
 	"github.com/laguilar-io/devbrowser/internal/server"
@@ -192,6 +193,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 	profileDir := filepath.Join(profilesDir, worktreeName)
 	url := fmt.Sprintf("http://localhost:%d", p)
+
+	// Symlink node_modules from repo root if missing in worktree
+	if depsMsg, depsErr := deps.EnsureNodeModules(repoRoot, worktreeDir); depsErr != nil {
+		fmt.Printf("⚠️  Could not symlink node_modules: %v\n", depsErr)
+	} else if depsMsg != "" {
+		fmt.Printf("  %s  %s\n", color.CyanString("deps    "), depsMsg)
+	}
 
 	// Copy .env*.local from repo root to worktree
 	var envResult *envfiles.CopyResult
