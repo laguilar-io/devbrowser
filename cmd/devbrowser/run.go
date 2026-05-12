@@ -310,7 +310,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 		select {
 		case <-sigCh:
-			_ = browserCmd.Process.Kill()
+			browser.KillBrowser(browserCmd, chromeBin, profileDir)
 			action := promptAfterChromeClosed()
 			switch action {
 			case "r":
@@ -332,12 +332,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 		case <-serverExitCh:
 			fmt.Println("\n🔴  Dev server exited — closing browser...")
-			_ = browserCmd.Process.Kill()
+			browser.KillBrowser(browserCmd, chromeBin, profileDir)
 			cleanup()
 			return nil
 
 		case <-browserDone:
-			_ = browserCmd.Process.Kill()
+			browser.KillBrowser(browserCmd, chromeBin, profileDir)
 			action := promptAfterChromeClosed()
 			switch action {
 			case "r":
@@ -415,12 +415,12 @@ func attachToSession(cfg config.Config, worktreeName string, existing *state.Ent
 
 		select {
 		case <-sigCh:
-			_ = browserCmd.Process.Kill()
+			browser.KillBrowser(browserCmd, chromeBin, profileDir)
 			if handleAction(promptAttachedChromeClosed()) {
 				return nil
 			}
 		case <-browserDone:
-			_ = browserCmd.Process.Kill()
+			browser.KillBrowser(browserCmd, chromeBin, profileDir)
 			if handleAction(promptAttachedChromeClosed()) {
 				return nil
 			}
@@ -488,7 +488,7 @@ func attachOnly(cfg config.Config, p int) error {
 
 		select {
 		case <-sigCh:
-			_ = browserCmd.Process.Kill()
+			browser.KillBrowser(browserCmd, chromeBin, profileDir)
 			action := promptAfterChromeClosed()
 			switch action {
 			case "r":
@@ -501,7 +501,7 @@ func attachOnly(cfg config.Config, p int) error {
 				return nil
 			}
 		case <-browserDone:
-			_ = browserCmd.Process.Kill()
+			browser.KillBrowser(browserCmd, chromeBin, profileDir)
 			action := promptAfterChromeClosed()
 			switch action {
 			case "r":

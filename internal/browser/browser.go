@@ -69,6 +69,20 @@ func Launch(binary, profileDir, url string) (*exec.Cmd, error) {
 	return cmd, nil
 }
 
+// KillBrowser terminates the browser. In WSL with a Windows EXE, the Linux PID
+// belongs to the WSL interop stub which has already exited; use PowerShell to
+// kill Chrome processes by profile directory instead.
+func KillBrowser(cmd *exec.Cmd, binary, profileDir string) {
+	if wsl.IsWSL() && strings.HasSuffix(strings.ToLower(binary), ".exe") {
+		winProfileDir := wsl.ToWindowsLocalPath(profileDir)
+		KillBrowserWSL(winProfileDir)
+		return
+	}
+	if cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+}
+
 // WaitForBrowserClose blocks until the browser window is closed.
 // In WSL with a Windows EXE the PID-based approach is unreliable (the WSL
 // interop stub exits when Chrome's launcher exits, not when the window closes),

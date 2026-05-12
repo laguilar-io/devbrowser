@@ -10,6 +10,16 @@ import (
 	"time"
 )
 
+// KillBrowserWSL forcefully terminates all chrome.exe processes that are using
+// the given Windows profile directory.
+func KillBrowserWSL(windowsProfileDir string) {
+	script := fmt.Sprintf(
+		`Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | Where-Object { $_.CommandLine -like '*%s*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
+		windowsProfileDir,
+	)
+	_ = exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script).Run()
+}
+
 // WaitForCloseWSL blocks until no chrome.exe with the given Windows profile
 // directory is running. Used in WSL where PID tracking is unreliable: the WSL
 // interop stub exits when Chrome's initial launcher exits, not when the user
