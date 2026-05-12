@@ -41,11 +41,16 @@ func Launch(binary, profileDir, url string) (*exec.Cmd, error) {
 		_ = os.WriteFile(firstRun, []byte{}, 0644)
 	}
 
-	// In WSL, chrome.exe is a Windows process and expects a Windows-style path
-	// for --user-data-dir. Convert the Linux path to a UNC path via wslpath.
+	// In WSL, chrome.exe expects a Windows-style path for --user-data-dir.
+	// Prefer a native drive-letter path (C:\...) over a UNC \\wsl.localhost\
+	// share — Chrome refuses UNC paths as profile directories.
 	userDataDir := profileDir
 	if wsl.IsWSL() && strings.HasSuffix(strings.ToLower(binary), ".exe") {
-		userDataDir = wsl.ToWindowsPath(profileDir)
+		if winPath := wsl.ToWindowsLocalPath(profileDir); winPath != "" {
+			userDataDir = winPath
+		} else {
+			userDataDir = wsl.ToWindowsPath(profileDir)
+		}
 	}
 
 	cmd := exec.Command(binary,
@@ -62,4 +67,31 @@ func Launch(binary, profileDir, url string) (*exec.Cmd, error) {
 		return nil, fmt.Errorf("failed to launch browser: %w", err)
 	}
 	return cmd, nil
+}
+
+// KillBrowser terminates the browser. In WSL with a Windows EXE, the Linux PID
+// belongs to the WSL interop stub which has already exited; use PowerShell to
+// kill Chrome processes by profile directory instead.
+func KillBrowser(cmd *exec.Cmd, binary, profileDir string) {
+	if wsl.IsWSL() && strings.HasSuffix(strings.ToLower(binary), ".exe") {
+		winProfileDir := wsl.ToWindowsLocalPath(profileDir)
+		KillBrowserWSL(winProfileDir)
+		return
+	}
+	if cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+}
+
+// WaitForBrowserClose blocks until the browser window is closed.
+// In WSL with a Windows EXE the PID-based approach is unreliable (the WSL
+// interop stub exits when Chrome's launcher exits, not when the window closes),
+// so we fall back to polling Chrome processes by profile directory.
+func WaitForBrowserClose(pid int, binary, profileDir string) {
+	if wsl.IsWSL() && strings.HasSuffix(strings.ToLower(binary), ".exe") {
+		winProfileDir := wsl.ToWindowsLocalPath(profileDir)
+		WaitForCloseWSL(winProfileDir)
+		return
+	}
+	WaitForClose(pid)
 }

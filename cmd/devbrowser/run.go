@@ -15,6 +15,7 @@ import (
 
 	"github.com/laguilar-io/devbrowser/internal/browser"
 	"github.com/laguilar-io/devbrowser/internal/config"
+	"github.com/laguilar-io/devbrowser/internal/deps"
 	"github.com/laguilar-io/devbrowser/internal/envfiles"
 	"github.com/laguilar-io/devbrowser/internal/port"
 	"github.com/laguilar-io/devbrowser/internal/server"
@@ -30,10 +31,27 @@ var (
 var stdinScanner = bufio.NewScanner(os.Stdin)
 
 func readLine() string {
-	if stdinScanner.Scan() {
-		return strings.TrimSpace(strings.ToLower(stdinScanner.Text()))
+	lineCh := make(chan string, 1)
+	go func() {
+		if stdinScanner.Scan() {
+			lineCh <- strings.TrimSpace(strings.ToLower(stdinScanner.Text()))
+		} else {
+			lineCh <- ""
+		}
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	select {
+	case line := <-lineCh:
+		return line
+	case <-sigCh:
+		fmt.Println()
+		os.Exit(0)
+		return ""
 	}
-	return ""
 }
 
 var runCmd = &cobra.Command{
@@ -170,7 +188,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 				d, _ := config.ProfilesDir()
 				return d
 			}(), worktreeName)
-			return attachToSession(cfg, worktreeName, existing.Port, existingProfileDir, existingURL)
+			return attachToSession(cfg, worktreeName, existing, existingProfileDir, existingURL)
 		}
 		// Stale entry — clean up and start fresh
 		fmt.Printf("  %s  stale session (PID %d dead) — starting fresh\n\n",
@@ -192,6 +210,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 	profileDir := filepath.Join(profilesDir, worktreeName)
 	url := fmt.Sprintf("http://localhost:%d", p)
+
+	// Symlink node_modules from repo root if missing in worktree
+	if depsMsg, depsErr := deps.EnsureNodeModules(repoRoot, worktreeDir); depsErr != nil {
+		fmt.Printf("⚠️  Could not symlink node_modules: %v\n", depsErr)
+	} else if depsMsg != "" {
+		fmt.Printf("  %s  %s\n", color.CyanString("deps    "), depsMsg)
+	}
 
 	// Copy .env*.local from repo root to worktree
 	var envResult *envfiles.CopyResult
@@ -276,7 +301,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 		browserDone := make(chan struct{}, 1)
 		go func() {
-			browser.WaitForClose(browserCmd.Process.Pid)
+			browser.WaitForBrowserClose(browserCmd.Process.Pid, chromeBin, profileDir)
 			browserDone <- struct{}{}
 		}()
 
@@ -285,19 +310,34 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 		select {
 		case <-sigCh:
-			fmt.Println("\n🔴  Interrupted — stopping dev server...")
-			_ = browserCmd.Process.Kill()
-			cleanup()
-			return nil
+			browser.KillBrowser(browserCmd, chromeBin, profileDir)
+			action := promptAfterChromeClosed()
+			switch action {
+			case "r":
+				clearScreen()
+				printSessionInfo(info)
+				fmt.Printf("🔄  Relaunching Chrome at %s...\n\n", url)
+				continue
+			case "k":
+				fmt.Println("🔴  Stopping dev server...")
+				cleanup()
+				return nil
+			default: // "q"
+				fmt.Printf("💤  Dev server kept running on port %d\n", p)
+				if len(args) == 1 {
+					fmt.Printf("    Re-attach: devbrowser %s\n", args[0])
+				}
+				return nil
+			}
 
 		case <-serverExitCh:
 			fmt.Println("\n🔴  Dev server exited — closing browser...")
-			_ = browserCmd.Process.Kill()
+			browser.KillBrowser(browserCmd, chromeBin, profileDir)
 			cleanup()
 			return nil
 
 		case <-browserDone:
-			_ = browserCmd.Process.Kill()
+			browser.KillBrowser(browserCmd, chromeBin, profileDir)
 			action := promptAfterChromeClosed()
 			switch action {
 			case "r":
@@ -321,22 +361,24 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 }
 
-func isServerAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	return syscall.Kill(pid, 0) == nil
-}
+func isServerAlive(pid int) bool { return isProcessAlive(pid) }
 
 // attachToSession opens Chrome for an existing session using the correct profile.
-// It reads the state entry so it can offer [k]ill server option.
-func attachToSession(cfg config.Config, worktreeName string, p int, profileDir, url string) error {
+// existing is passed in so [k]ill works even if state.json is cleared externally.
+func attachToSession(cfg config.Config, worktreeName string, existing *state.Entry, profileDir, url string) error {
+	p := existing.Port
 	chromeBin, err := browser.Find(cfg.BrowserPath)
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(profileDir, 0755); err != nil {
 		return err
+	}
+
+	killServer := func() {
+		fmt.Println("🔴  Stopping dev server...")
+		killGroupByPGID(existing.ServerPGID)
+		_ = state.Remove(worktreeName)
 	}
 
 	for {
@@ -347,34 +389,34 @@ func attachToSession(cfg config.Config, worktreeName string, p int, profileDir, 
 
 		browserDone := make(chan struct{}, 1)
 		go func() {
-			browser.WaitForClose(browserCmd.Process.Pid)
+			browser.WaitForBrowserClose(browserCmd.Process.Pid, chromeBin, profileDir)
 			browserDone <- struct{}{}
 		}()
 
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
+		handleAction := func(action string) (done bool) {
+			switch action {
+			case "k":
+				killServer()
+				return true
+			case "q":
+				fmt.Printf("💤  Detached. Server still on port %d\n", p)
+				return true
+			}
+			return false // "r" — relaunch
+		}
+
 		select {
 		case <-sigCh:
-			fmt.Println("\n🔴  Interrupted.")
-			_ = browserCmd.Process.Kill()
-			return nil
-		case <-browserDone:
-			_ = browserCmd.Process.Kill()
-			action := promptAttachedChromeClosed()
-			switch action {
-			case "r":
-				continue
-			case "k":
-				fmt.Println("🔴  Stopping dev server...")
-				entry, _ := state.Get(worktreeName)
-				if entry != nil {
-					killGroupByPGID(entry.ServerPGID)
-					_ = state.Remove(worktreeName)
-				}
+			browser.KillBrowser(browserCmd, chromeBin, profileDir)
+			if handleAction(promptAttachedChromeClosed()) {
 				return nil
-			default: // "q"
-				fmt.Printf("💤  Detached. Server still on port %d\n", p)
+			}
+		case <-browserDone:
+			browser.KillBrowser(browserCmd, chromeBin, profileDir)
+			if handleAction(promptAttachedChromeClosed()) {
 				return nil
 			}
 		}
@@ -432,7 +474,7 @@ func attachOnly(cfg config.Config, p int) error {
 
 		browserDone := make(chan struct{}, 1)
 		go func() {
-			browser.WaitForClose(browserCmd.Process.Pid)
+			browser.WaitForBrowserClose(browserCmd.Process.Pid, chromeBin, profileDir)
 			browserDone <- struct{}{}
 		}()
 
@@ -441,11 +483,20 @@ func attachOnly(cfg config.Config, p int) error {
 
 		select {
 		case <-sigCh:
-			fmt.Println("\n🔴  Interrupted.")
-			_ = browserCmd.Process.Kill()
-			return nil
+			browser.KillBrowser(browserCmd, chromeBin, profileDir)
+			action := promptAfterChromeClosed()
+			switch action {
+			case "r":
+				clearScreen()
+				printSessionInfo(info)
+				fmt.Printf("🔄  Relaunching Chrome at %s...\n\n", url)
+				continue
+			default:
+				fmt.Printf("💤  Detached from port %d\n", p)
+				return nil
+			}
 		case <-browserDone:
-			_ = browserCmd.Process.Kill()
+			browser.KillBrowser(browserCmd, chromeBin, profileDir)
 			action := promptAfterChromeClosed()
 			switch action {
 			case "r":
